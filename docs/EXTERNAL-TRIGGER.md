@@ -3,6 +3,38 @@
 原生 `schedule` 若长期不投递，用外部定时器每天调用 GitHub API 的
 `workflow_dispatch`。这条路不依赖 GitHub 的调度器，准点由外部服务保证。
 
+## 0. 两条路，已在跑的是第 1 条
+
+| 路径 | 是否需要新账号 | 是否已落地 | 对电脑的要求 |
+|---|---|---|---|
+| **1. 本机 Windows 计划任务**（用已登录的 `gh` 触发云端） | 不需要 | ✅ **已完成并验证** | 每天 19:20 电脑需开机联网 |
+| 2. cron-job.org + fine-grained PAT（真正脱离电脑） | 需要（网页登录创建） | ⏳ 待用户创建 | 无 |
+
+### 路径 1 的实现（已生效）
+
+- 脚本：[`scripts/Trigger-Cloud.ps1`](../scripts/Trigger-Cloud.ps1)
+- 计划任务名：`HDU-Cloud-Trigger-1920`
+- 触发时间：每天 **19:20**（本机时区 China Standard Time）
+- 行为：调用 `gh workflow run main.yml --repo TaoTao-319/HDU-Library-CloudBooking -f mode=book`，
+  失败自动重试（最多 8 分钟），日志写 `.local/trigger-cloud.log`
+- 守卫：`book` 模式若在 **20:14** 之后才被启动（例如电脑开机很晚），直接跳过并退出 0，
+  不产生无意义的红色运行
+- 任务设置：`StartWhenAvailable`、`WakeToRun`、单实例 `IgnoreNew`、超时 10 分钟
+
+验证记录：
+
+| 验证项 | 结果 |
+|---|---|
+| 脚本 `-Mode check` 直接调用 | exit 0，日志 `attempt 1 dispatched` |
+| `Start-ScheduledTask` 真实拉起任务 | `LastTaskResult = 0`，派发 `mode=book` |
+| 云端收到的 `workflow_dispatch` 运行 | run `39601467954`（check）登录通过 + 只读检查完成 |
+| 20:41 的 `book` 派发 | 被守卫跳过，exit 0（不再产生红叉） |
+
+日常维护：`Get-ScheduledTaskInfo -TaskName HDU-Cloud-Trigger-1920` 看上次结果；
+`Unregister-ScheduledTask -TaskName HDU-Cloud-Trigger-1920 -Confirm:$false` 可移除。
+
+---
+
 ## 1. 创建 fine-grained PAT（只有你能做）
 
 1. GitHub → 右上头像 → Settings → Developer settings →
