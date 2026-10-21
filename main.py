@@ -666,14 +666,20 @@ def run_daily(client, args, day, slots, target_date, seat_config, user_config):
             checkpoint()
             return result
         except NoSeats as error:
+            if index == 1 and now() < cutoff:
+                # 首轮地图可能在开放窗口生效前被查询，不能据此结束整天。
+                LOG.warning('首轮地图显示无位，可能是窗口尚未生效，继续下一轮：%s', error)
+                continue
             state['finished'] = '四楼无可用座位'
             checkpoint()
             LOG.info('%s', error)
             return 0
         except (BookingError, requests.RequestException) as error:
             LOG.warning('第 %d/5 轮未成功：%s', index, error)
-            if any(word in str(error) for word in ('统一身份认证失败', '验证码', '无法解密',
-                    '请设置 SCHOOL_ID', '已有覆盖订单不在', '与已有预约部分重叠', '已有其他预约')):
+            if any(word in str(error) for word in (
+                    '统一身份认证失败', '统一身份认证被拒绝', '加密参数', '页面可能已改版',
+                    '验证码', '无法解密', '请设置 SCHOOL_ID', '已有覆盖订单不在',
+                    '与已有预约部分重叠', '已有其他预约')):
                 raise
             if '会话失效' in str(error) or '登录状态验证失败' in str(error):
                 logged_in = False

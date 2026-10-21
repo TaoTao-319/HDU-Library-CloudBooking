@@ -111,10 +111,15 @@ class SeatPlanTests(unittest.TestCase):
         client.login.assert_called_once()
 
     def test_success_and_full_floor_end_remaining_rounds(self):
-        for outcome in (0, main.NoSeats('四楼无座')):
-            result, calls, client = self.simulate([outcome], repeat=True)
-            self.assertEqual((result, calls), (0, 1))
-            client.login.assert_called_once()
+        result, calls, client = self.simulate([0], repeat=True)
+        self.assertEqual((result, calls), (0, 1))
+        client.login.assert_called_once()
+        # 首轮地图无位可能只是开放窗口还没生效，必须继续下一轮；
+        # 第二轮起再确认无位就结束当天计划。
+        result, calls, client = self.simulate(
+            [main.NoSeats('首轮无座'), main.NoSeats('四楼无座')], repeat=True)
+        self.assertEqual((result, calls), (0, 2))
+        client.login.assert_called_once()
 
     def test_expired_plan_never_logs_in_or_submits(self):
         end = datetime(2026, 10, 21, 20, 16, tzinfo=main.SHANGHAI)
