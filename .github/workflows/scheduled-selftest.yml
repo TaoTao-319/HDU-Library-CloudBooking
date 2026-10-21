@@ -39,7 +39,7 @@ jobs:
       - name: Verify this run created the order
         run: >-
           python scripts/verify_native_booking.py --date 2026-10-22
-          --start 7 --hours 1 --event schedule
+          --start 7 --hours 1 --event schedule,workflow_dispatch
       - name: Save diagnostics
         if: always()
         uses: actions/upload-artifact@v4
