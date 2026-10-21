@@ -1,0 +1,53 @@
+name: Scheduled booking self-test
+
+# Temporary proof that a GitHub-native schedule event can complete a real
+# booking. It books one hour on the day named below, then reports whether the
+# run was triggered by `schedule`. Delete this file after the test.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hdu-seat-selftest
+  cancel-in-progress: false
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TZ: Asia/Shanghai
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Book 07:00-08:00 on 2026-10-22 (fourth floor)
+        env:
+          SCHOOL_ID: ${{ secrets.SCHOOL_ID }}
+          PASSWORD: ${{ secrets.PASSWORD }}
+        run: >-
+          python main.py --test-booking --date 2026-10-22 --start 7 --hours 1
+          --region 自定义
+      - name: Verify this run created the order
+        run: >-
+          python scripts/verify_native_booking.py --date 2026-10-22
+          --start 7 --hours 1 --event schedule
+      - name: Save diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scheduled-selftest-${{ github.run_id }}
+          path: |
+            logs/*.log
+            .local/booking-*.json
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7

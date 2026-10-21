@@ -1,0 +1,5 @@
+SeatAutoBooker:
+  # 已恢复本机预约；本机与 GitHub Actions 均可按配置运行。
+  cloud-only: false
+  # 顺序尝试不同可用座位；遇到服务限流等待下轮补跑。
+  max-retry: 332

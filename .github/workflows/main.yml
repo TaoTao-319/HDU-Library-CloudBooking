@@ -1,0 +1,63 @@
+name: HDU Auto Book
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'book = 真实预约；check = 只读检查（登录+选座，不提交）'
+        type: choice
+        options: [book, check]
+        default: book
+  schedule:
+    # GitHub cron is always UTC; Beijing time is UTC+8, so 11:20 UTC = 19:20.
+    # Every entry starts before the 20:00 release and the job then waits for the
+    # exact release second internally, which makes GitHub scheduler delay harmless.
+    - cron: '20 11 * * *'   # 19:20 Beijing
+    - cron: '35 11 * * *'   # 19:35 Beijing
+    - cron: '50 11 * * *'   # 19:50 Beijing
+
+permissions:
+  contents: read
+
+concurrency:
+  # Serialise runs so a delayed trigger can never book two seats for one slot.
+  group: hdu-seat-booking
+  cancel-in-progress: false
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      TZ: Asia/Shanghai
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Read-only check
+        if: github.event.inputs.mode == 'check'
+        env:
+          SCHOOL_ID: ${{ secrets.SCHOOL_ID }}
+          PASSWORD: ${{ secrets.PASSWORD }}
+        run: python main.py --check --start 15 --hours 7
+      - name: Book seat
+        if: github.event.inputs.mode != 'check'
+        env:
+          SCHOOL_ID: ${{ secrets.SCHOOL_ID }}
+          PASSWORD: ${{ secrets.PASSWORD }}
+        run: python main.py --daily
+      - name: Save diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-booking-${{ github.run_id }}
+          path: |
+            logs/*.log
+            .local/booking-*.json
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
