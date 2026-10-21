@@ -307,7 +307,8 @@ class SeatAutoBooker:
                 error = BookingError('统一身份认证网络异常：' + type(failure).__name__)
             except BookingError as failure:
                 error = failure
-                if any(word in str(failure) for word in ('被拒绝', '密码', '账号', '锁定', '禁用')):
+                if any(word in str(failure) for word in
+                       ('被拒绝', '密码', '账号', '锁定', '禁用', '验证码', '限制')):
                     raise
             if attempt < 2:
                 LOG.warning('统一身份认证第 %d 次失败：%s；1 秒后重试', attempt + 1, error)

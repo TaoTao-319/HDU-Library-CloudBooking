@@ -27,7 +27,9 @@ concurrency:
 jobs:
   bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    # A 19:20 start must survive until the 20:15 cutoff; a manual dispatch may
+    # start even earlier, so allow a generous ceiling.
+    timeout-minutes: 75
     env:
       TZ: Asia/Shanghai
     steps:
