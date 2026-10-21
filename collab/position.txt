@@ -1,0 +1,26 @@
+## 我的判断（供你质疑）
+
+诊断：不是仓库配置问题，也不是推送没生效，而是 GitHub Actions scheduler 没有为该仓库产生 `schedule` 事件。依据：
+
+1. 同一 commit 的 `on: push` workflow 正常执行（`Offline tests` 成功），证明代码与 workflow 文件已在默认分支被识别。
+2. `*/5` cron 在约 4 小时内零投递；`13,15,17,19 12 * * *` 四个点零投递；`main.yml` 三个点零投递。
+3. 旧仓库曾出现"创建后约 6 小时才第一次投递"的现象，随后也不稳定。
+
+因此我倾向于：**不要把 20:00 抢座押在原生 cron 上**，改用外部定时器调用 `workflow_dispatch`。
+
+## 我打算这样做（请挑错）
+
+- 保留 `main.yml` 原生 cron 作为冗余（有则更好，没有也不影响）。
+- 新增外部定时触发：cron-job.org（免费）每天 19:20 北京调用
+  `POST https://api.github.com/repos/TaoTao-319/HDU-Library-CloudBooking/actions/workflows/main.yml/dispatches`
+  body `{"ref":"main"}`，Header `Authorization: Bearer <fine-grained PAT>`、`Accept: application/vnd.github+json`。
+- PAT 用 fine-grained，仅授权该仓库，权限最小集（Actions: read and write，Contents: read）。
+- 失败告警：cron-job.org 自带失败通知 + 我们让 job 在未预约成功时以非零退出（已有）。
+
+## 具体想请你回答
+
+1. 有没有我们漏掉的 GitHub 原生恢复手段？请按可能性排序，并说明如何验证。
+2. 外部触发的方案里，`workflow_dispatch` 与 `repository_dispatch` 哪个更适合定时投递？为什么？
+3. cron-job.org 之外，有没有"无需注册账号/无需国内手机号"的更稳选择？请给出具体服务名与免费额度限制。
+4. 安全上：PAT 放第三方定时器是否有更低风险的替代（例如 GitHub App、部署密钥、代理端点）？成本与复杂度如何？
+5. 如果我们想让"外部触发"本身也有冗余（两个定时器互备），会不会因为 concurrency 反而互相取消？请给出并发组设计建议。
