@@ -251,7 +251,9 @@ class SeatAutoBooker:
             remaining = (deadline - now()).total_seconds()
             if remaining <= 0:
                 raise BookingError('本轮时间预算已用完，停止新增预约请求')
-            kwargs['timeout'] = (min(2, remaining / 2), min(15, remaining / 2))
+            # 高峰期限流时服务器可能长时间不响应。把读超时压到 6 秒，
+            # 让本轮失败得更快、把剩余预算留给下一轮或下一个座位。
+            kwargs['timeout'] = (min(2, remaining / 2), min(6, remaining / 2))
         response = self.session.request(method, BASE_URL + path, **kwargs)
         elapsed = (time.perf_counter() - started) * 1000
         response.raise_for_status()
@@ -472,13 +474,19 @@ class SeatAutoBooker:
                 LOG.info('新预约提交已获服务器确认并通过查单：订单 %s', result['bookingId'])
                 return verified
             message = str(result.get('msg') or payload.get('MESSAGE') or '预约失败')
-            if any(key in message for key in ('频繁', '人数过多', '稍后')):
+            limited = any(key in message for key in ('频繁', '人数过多', '稍后'))
+            not_open = any(word in message for word in ('超出可预约座位时间范围', '未开放', '未到预约'))
+            # 服务端限流优先判定：继续重试只会加重限流，交给下一轮更安全。
+            if limited:
                 raise BookingError('服务限流，等待下一轮补跑：' + message)
             if (opening_deadline and now() < opening_deadline and window_retries < 3
-                    and any(word in message for word in ('超出可预约座位时间范围', '未开放', '未到预约'))):
-                delay = min(0.4 * (2 ** window_retries), (opening_deadline - now()).total_seconds())
+                    and not_open):
+                # 整点放号时窗口常常晚零点几秒才生效。退避从 0.4 秒拉长到
+                # 1/2/3 秒，避免第一次重试就被判成"请求太频繁"。
+                delay = min((1.0, 2.0, 3.0)[window_retries],
+                            (opening_deadline - now()).total_seconds())
                 if delay > 0:
-                    LOG.warning('开放边界拒绝，%.1f 秒后重试同一座位：%s', delay, message)
+                    LOG.warning('开放边界退避 %.1f 秒后重试同一座位：%s', delay, message)
                     time.sleep(delay)
                     candidates.appendleft(seat)
                     window_retries += 1
@@ -567,16 +575,27 @@ def reserve_day(client, args, day, slots, target_date, target_time, seat_config,
                         (now() - target_time).total_seconds())
         else:
             LOG.info('登录、查单及候选座位准备已完成；等待 %s', target_time.isoformat())
-            wait_until(max(target_time - timedelta(seconds=10), now()))
-            try:
-                client.get_user_info(timeout=(2, 3))
-            except requests.RequestException as error:
-                LOG.warning('连接预热失败（%s），仍按目标时间尝试提交', type(error).__name__)
+
+            def warm(stage):
+                try:
+                    client.get_user_info(timeout=(2, 4))
+                    LOG.info('连接预热完成（%s前）', stage)
+                except requests.RequestException as error:
+                    LOG.warning('%s前预热失败（%s），仍按目标时间尝试提交',
+                                stage, type(error).__name__)
+
+            # 两次预热：提前 30 秒确认会话仍然有效（真失效还有时间重新登录），
+            # 整点前 3 秒再握一次手，保证 20:00:00 那一枪走的是热连接。
+            wait_until(max(target_time - timedelta(seconds=30), now()))
+            warm('整点 30 秒')
+            wait_until(max(target_time - timedelta(seconds=3), now()))
+            warm('整点 3 秒')
             wait_until(target_time)
             LOG.info('触发偏差 %.3f ms', (now() - target_time).total_seconds() * 1000)
     results = []
     for begin, duration, seats, duplicate in prepared:
-        opening_deadline = (target_time + timedelta(seconds=4)
+        # 整点后 8 秒是"放号窗口"退避区，覆盖 1/2/3 秒三段退避。
+        opening_deadline = (target_time + timedelta(seconds=8)
                             if target_time and target_time.strftime('%H:%M:%S') == '20:00:00' else None)
         custom = user_config.get('自定义', [])
         if duplicate:
@@ -591,6 +610,14 @@ def reserve_day(client, args, day, slots, target_date, target_time, seat_config,
         result['github_run_id'] = os.environ.get('GITHUB_RUN_ID', '')
         LOG.info('预约已核实：%s %s号座，%s，订单 %s', result['room'], result['seat'], result['begin'], result['booking_id'])
         minutes = int(result.get('duration', 0)) // 60
+        sign_line = ''
+        try:
+            start_at = datetime.fromisoformat(result['begin'])
+            sign_line = ('- 签到窗口：%s–%s（未签到可能记违约）\n' % (
+                (start_at - timedelta(minutes=30)).strftime('%m-%d %H:%M'),
+                (start_at + timedelta(minutes=30)).strftime('%H:%M')))
+        except (KeyError, ValueError):
+            pass
         write_summary(
             '### 预约成功\n\n'
             f"- 座位：{result.get('room', '?')} {result.get('seat', '?')}号\n"
@@ -598,7 +625,8 @@ def reserve_day(client, args, day, slots, target_date, target_time, seat_config,
             f"- 时长：{minutes} 分钟\n"
             f"- 订单：{result.get('booking_id', '?')}\n"
             f"- 触发：{result['trigger_event']}；运行 {result['github_run_id'] or '本机'}\n"
-            f"- 原本已有预约：{'是' if result['already_existed'] else '否'}\n")
+            f"- 原本已有预约：{'是' if result['already_existed'] else '否'}\n"
+            + sign_line)
         results.append(result)
         LOCAL.mkdir(exist_ok=True)
         report = LOCAL / ('booking-' + now().strftime('%Y%m%d-%H%M%S-%f') + '.json')
@@ -635,6 +663,7 @@ def run_daily(client, args, day, slots, target_date, seat_config, user_config):
         LOG.info('今日计划已结束：%s', state['finished'])
         return 0
     logged_in = False
+    write_summary('### 云端预约执行记录\n')
     for index, target in enumerate(targets, 1):
         key = target.isoformat()
         if key in state['attempted']:
@@ -648,8 +677,10 @@ def run_daily(client, args, day, slots, target_date, seat_config, user_config):
             # 用完预算。只要还在当天的报名窗口内，就立即补跑而不是跳过整天。
             if now() >= cutoff:
                 LOG.warning('第 %d/5 轮已过期，跳过 %s', index, key)
+                write_summary(f'- 第 {index}/5 轮：已过 20:15 窗口，跳过')
                 continue
             LOG.warning('第 %d/5 轮已过计划时刻 %s，立即补跑', index, key)
+            write_summary(f'- 第 {index}/5 轮：启动晚于计划，立即补跑')
             target = now()
             deadline = min(target + timedelta(seconds=15), cutoff)
         state['attempted'].append(key)
@@ -670,13 +701,16 @@ def run_daily(client, args, day, slots, target_date, seat_config, user_config):
             if index == 1 and now() < cutoff:
                 # 首轮地图可能在开放窗口生效前被查询，不能据此结束整天。
                 LOG.warning('首轮地图显示无位，可能是窗口尚未生效，继续下一轮：%s', error)
+                write_summary(f'- 第 {index}/5 轮：地图暂无位，继续下一轮')
                 continue
             state['finished'] = '四楼无可用座位'
             checkpoint()
             LOG.info('%s', error)
+            write_summary(f'- 第 {index}/5 轮：四楼无可用座位，结束当日计划')
             return 0
         except (BookingError, requests.RequestException) as error:
             LOG.warning('第 %d/5 轮未成功：%s', index, error)
+            write_summary(f'- 第 {index}/5 轮：{error}')
             if any(word in str(error) for word in (
                     '统一身份认证失败', '统一身份认证被拒绝', '加密参数', '页面可能已改版',
                     '验证码', '无法解密', '请设置 SCHOOL_ID', '已有覆盖订单不在',
@@ -685,6 +719,7 @@ def run_daily(client, args, day, slots, target_date, seat_config, user_config):
             if '会话失效' in str(error) or '登录状态验证失败' in str(error):
                 logged_in = False
     LOG.error('今日五轮已结束，没有确认新预约')
+    write_summary('\n**五轮结束：没有确认新预约。**')
     return 1
 
 

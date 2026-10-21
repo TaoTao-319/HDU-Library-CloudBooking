@@ -212,9 +212,38 @@ except main.AlreadyRunning:
                 patch('main.SeatAutoBooker', return_value=client), patch('main.wait_until', side_effect=wait):
             self.assertEqual(main.run(args), 0)
         client.available_seats.assert_not_called()
-        self.assertEqual(events, [('wait', target - timedelta(seconds=10)),
-                                 ('warm', target - timedelta(seconds=10)),
+        self.assertEqual(events, [('wait', target - timedelta(seconds=30)),
+                                 ('warm', target - timedelta(seconds=30)),
+                                 ('wait', target - timedelta(seconds=3)),
+                                 ('warm', target - timedelta(seconds=3)),
                                  ('wait', target), ('submit', target)])
+
+    def test_run_summary_reports_order_and_sign_in_window(self):
+        target = datetime(2026, 10, 19, 20, 0, tzinfo=main.SHANGHAI)
+        args = Mock(date=datetime(2026, 10, 21).date(), at='20:00', check=False, test_booking=False)
+        configs = [{'周三': {'启用': True, 'name': '二楼西', '开始时间': 7, '持续小时数': 1}},
+                   {'SeatAutoBooker': {}}, {'二楼西': {'ranges': [[1, 1]]}}]
+        client = Mock()
+        client.bookings.return_value = []
+        client.covered_booking.return_value = None
+        client.available_seats.return_value = [{'id': 1, 'number': '1'}]
+        client.book_slot.return_value = {'room': '二楼西', 'seat': '1', 'begin': '2026-10-21T07:00:00+08:00',
+                                         'duration': 3600, 'booking_id': '9'}
+        with tempfile.TemporaryDirectory() as folder:
+            summary = Path(folder) / 'summary.md'
+            with patch('main.LOCAL', Path(folder)), \
+                    patch('main.now', return_value=target - timedelta(seconds=1)), \
+                    patch('main.read_yaml', side_effect=configs), \
+                    patch('main.SeatAutoBooker', return_value=client), \
+                    patch('main.wait_until'), \
+                    patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(summary)}):
+                self.assertEqual(main.run(args), 0)
+            text = summary.read_text(encoding='utf-8')
+        self.assertIn('预约成功', text)
+        self.assertIn('订单：9', text)
+        self.assertIn('签到窗口', text)
+        self.assertIn('06:30', text)
+        self.assertIn('07:30', text)
 
     def test_opening_rejection_retries_same_seat_and_refreshes_request(self):
         client = self.client()
@@ -225,7 +254,8 @@ except main.AlreadyRunning:
         with patch('main.now', return_value=target), patch('main.time.sleep') as sleep:
             result = client.book_slot(100, 200, [{'id': 62599}], target + timedelta(seconds=4))
         self.assertTrue(result['submission_confirmed'])
-        sleep.assert_called_once_with(0.4)
+        # 整点退避改为 1/2/3 秒，避免 0.4 秒就撞上"请求太频繁"。
+        sleep.assert_called_once_with(1.0)
         self.assertEqual([call.kwargs['data']['seats[0]'] for call in client.request.call_args_list], [62599, 62599])
 
     def test_opening_retries_are_bounded_and_not_used_after_window(self):
