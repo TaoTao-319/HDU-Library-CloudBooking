@@ -76,7 +76,7 @@ class SeatPlanTests(unittest.TestCase):
         day = datetime(2026, 10, 21, 19, 55, tzinfo=main.SHANGHAI)
         result = daily_targets(day, self.config['自动预约'])
         self.assertEqual([t.strftime('%H:%M:%S') for t in result],
-                         ['20:00:00', '20:00:30', '20:01:30', '20:04:00', '20:10:00'])
+                         ['20:00:00', '20:00:25', '20:01:00', '20:02:00', '20:04:00'])
         for times in (['20:00:00'] * 5, ['20:00:00', '20:01:00'],
                       ['20:00:00', '20:01:00', '20:02:00', '20:03:00', '20:16:00']):
             with self.assertRaises(ValueError):

@@ -639,18 +639,18 @@ def run_daily(client, args, day, slots, target_date, seat_config, user_config):
         if key in state['attempted']:
             LOG.info('第 %d/5 轮已执行过，避免进程重启后重复运行', index)
             continue
+        if index > 1 and now() < target - timedelta(seconds=20):
+            wait_until(target - timedelta(seconds=20))
         deadline = min(target + timedelta(seconds=20), cutoff)
         if now() >= deadline:
-            # Cloud jobs may start long after the requested cron time; the first
-            # pending round then books immediately instead of skipping the day.
-            if index > 1 or now() >= cutoff:
-                LOG.warning('第 %d/5 轮已过期，跳过 %s', index, target.isoformat())
+            # GitHub 的 cron 可能比计划晚几十分钟才把 Job 跑起来，上一轮也可能
+            # 用完预算。只要还在当天的报名窗口内，就立即补跑而不是跳过整天。
+            if now() >= cutoff:
+                LOG.warning('第 %d/5 轮已过期，跳过 %s', index, key)
                 continue
+            LOG.warning('第 %d/5 轮已过计划时刻 %s，立即补跑', index, key)
             target = now()
-            deadline = min(target + timedelta(seconds=20), cutoff)
-            LOG.warning('计划轮次已过期但仍在报名窗口内，立即执行本轮')
-        if index > 1:
-            wait_until(target - timedelta(seconds=20))
+            deadline = min(target + timedelta(seconds=15), cutoff)
         state['attempted'].append(key)
         checkpoint()
         client.round_deadline = deadline
