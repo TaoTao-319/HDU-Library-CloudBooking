@@ -8,7 +8,15 @@
 | 路径 | 是否需要新账号 | 是否已落地 | 对电脑的要求 |
 |---|---|---|---|
 | **1. 本机 Windows 计划任务**（用已登录的 `gh` 触发云端） | 不需要 | ✅ **已完成并验证** | 每天 19:20 电脑需开机联网 |
-| 2. cron-job.org + fine-grained PAT（真正脱离电脑） | 需要（网页登录创建） | ⏳ 待用户创建 | 无 |
+| 2. cron-job.org + fine-grained PAT | 需要（网页登录创建） | ⏳ 待用户创建 | 无 |
+| **3. Cloudflare Worker + Cron Trigger** | 需要（邮箱注册） | ⏳ 代码已就绪（`workers/trigger.js`） | 无 |
+
+> **2026-10-21 21:05 实测**：cron-job.org 全站维护中——
+> `console.cron-job.org` 的 login / signup / jobs 三个页面都返回同一张
+> `cron-job.org Console — Maintenance` 页，主站 `cron-job.org/signup` 连续返回 504，
+> `status.cron-job.org` 不可达。这不是本机网络问题。
+> 因此把**路径 3（Cloudflare Worker）**作为优先替代：定时更准，
+> 且 PAT 存在 Cloudflare 加密变量里，第三方拿不到。
 
 ### 路径 1 的实现（已生效）
 
@@ -51,8 +59,32 @@
 5. Expiration：**30 天**（到期前换新，避免长期泄露）。
 6. 生成后立刻复制，**只粘贴到 cron-job.org**，不要发到聊天、不要写进仓库。
 
-## 2. 在 cron-job.org 建任务
+## 1.5 Cloudflare Worker（cron-job.org 维护中时的首选）
 
+代码已就绪：[`workers/trigger.js`](../workers/trigger.js)，全部在 Cloudflare 控制台完成，不需要命令行。
+
+1. **注册**：https://dash.cloudflare.com/sign-up（邮箱 + 密码，收邮件验证即可，无需手机号）
+2. 左侧 **Workers & Pages** → **Create** → **Worker** → 命名（如 `hdu-trigger`）→ Deploy
+3. 点 **Edit code**，把 `workers/trigger.js` 全部内容粘贴进去覆盖模板 → **Deploy**
+4. **Settings → Variables and Secrets**，加 3 个 **Encrypted** 变量：
+
+   | 变量名 | 值 |
+   |---|---|
+   | `GH_PAT` | 你的 fine-grained PAT（见第 1 节） |
+   | `TRIGGER_KEY` | 随便一串随机字符（手动测试用） |
+   | `REPO` | `TaoTao-319/HDU-Library-CloudBooking` |
+   | `WORKFLOW` | `main.yml` |
+
+5. **Settings → Triggers → Cron Triggers → Add**：填 `20 11 * * *`
+   （Cloudflare 的 cron 是 **UTC**，11:20 UTC = 北京时间 19:20）
+6. **手动验证**：浏览器打开
+   `https://<你的-worker>.workers.dev/?key=<TRIGGER_KEY>`
+   返回 `{"status":204,"ok":true}` 就是成功，此时 Actions 里应出现一条 `workflow_dispatch` 运行。
+
+优点：定时精确（不需要像 cron-job.org 那样靠外部服务重试）、PAT 存在 Cloudflare 加密变量里不落第三方、
+免费额度足够（一条 cron 每天一次）。
+
+## 2. 在 cron-job.org 建任务
 1. 注册免费账号（邮箱即可，无需手机号）。
 2. Create cronjob：
    - Title: `HDU seat booking 19:20`
