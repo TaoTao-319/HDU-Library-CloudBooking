@@ -1,0 +1,7 @@
+name = "hdu-trigger"
+main = "trigger.js"
+compatibility_date = "2026-10-01"
+
+# UTC 11:20 = 北京时间 19:20，每天触发一次云端预约 workflow
+[triggers]
+crons = ["20 11 * * *"]

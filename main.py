@@ -453,6 +453,7 @@ class SeatAutoBooker:
             raise BookingError('没有符合条件的空闲座位')
         candidates = deque(seats[:attempts])
         window_retries = 0
+        limit_retries = 0
         while candidates:
             deadline = getattr(self, 'round_deadline', None)
             if deadline and now() >= deadline:
@@ -476,17 +477,29 @@ class SeatAutoBooker:
             message = str(result.get('msg') or payload.get('MESSAGE') or '预约失败')
             limited = any(key in message for key in ('频繁', '人数过多', '稍后'))
             not_open = any(word in message for word in ('超出可预约座位时间范围', '未开放', '未到预约'))
-            # 服务端限流优先判定：继续重试只会加重限流，交给下一轮更安全。
-            if limited:
-                raise BookingError('服务限流，等待下一轮补跑：' + message)
-            if (opening_deadline and now() < opening_deadline and window_retries < 3
-                    and not_open):
-                # 整点放号时窗口常常晚零点几秒才生效。退避从 0.4 秒拉长到
-                # 1/2/3 秒，避免第一次重试就被判成"请求太频繁"。
-                delay = min((1.0, 2.0, 3.0)[window_retries],
+            opening = bool(opening_deadline and now() < opening_deadline)
+            # 整点刚放号时，服务端会对同一账号做突发限流。2026-10-23 实测第一次
+            # 提交（20:00:00.02，仅 20ms 就返回）就被判"请求太频繁"，若按老逻辑
+            # 直接放弃整轮，要等到 20:00:25 才有下一次机会，特等座早没了。
+            # 所以在放号窗口内给限流 2 次短退避（1s、2s），窗口外才放弃整轮。
+            if limited and opening and limit_retries < 2:
+                delay = min((1.0, 2.0)[limit_retries],
                             (opening_deadline - now()).total_seconds())
                 if delay > 0:
-                    LOG.warning('开放边界退避 %.1f 秒后重试同一座位：%s', delay, message)
+                    LOG.warning('限流退避 %.1f 秒后重试同一座位：%s', delay, message)
+                    time.sleep(delay)
+                    candidates.appendleft(seat)
+                    limit_retries += 1
+                    continue
+            if limited:
+                raise BookingError('服务限流，等待下一轮补跑：' + message)
+            if opening and not_open and window_retries < 4:
+                # 放号瞬间窗口可能晚零点几秒生效，用毫秒级递进退避贴着窗口抢：
+                # 0.15 / 0.35 / 0.75 / 1.5 秒，累计不到 2.8 秒。
+                delay = min((0.15, 0.35, 0.75, 1.5)[window_retries],
+                            (opening_deadline - now()).total_seconds())
+                if delay > 0:
+                    LOG.warning('开放边界退避 %.2f 秒后重试同一座位：%s', delay, message)
                     time.sleep(delay)
                     candidates.appendleft(seat)
                     window_retries += 1
@@ -576,20 +589,25 @@ def reserve_day(client, args, day, slots, target_date, target_time, seat_config,
         else:
             LOG.info('登录、查单及候选座位准备已完成；等待 %s', target_time.isoformat())
 
-            def warm(stage):
+            def warm(stage, timeout=(2, 3)):
                 try:
-                    client.get_user_info(timeout=(2, 4))
+                    client.get_user_info(timeout=timeout)
                     LOG.info('连接预热完成（%s前）', stage)
                 except requests.RequestException as error:
                     LOG.warning('%s前预热失败（%s），仍按目标时间尝试提交',
                                 stage, type(error).__name__)
 
-            # 两次预热：提前 30 秒确认会话仍然有效（真失效还有时间重新登录），
-            # 整点前 3 秒再握一次手，保证 20:00:00 那一枪走的是热连接。
+            # 两次预热，但都不许拖到整点：
+            #  -30 秒：确认会话还有效，真失效还有时间重新登录；
+            #  -8  秒：把 TCP/TLS 连接刷新到最新，避免整点那一枪因为长连接被
+            #         服务端回收而重新握手，甚至直接撞上失效连接。
+            # 第二次的超时上限是 3 秒，最坏 -5 秒收工，仍比整点早 3 秒。
+            # 2026-10-23 的教训：原来放在 -3 秒且超时 4 秒，一次 ReadTimeout
+            # 就把提交拖晚 1325ms，等于把特等座拱手让人。
             wait_until(max(target_time - timedelta(seconds=30), now()))
             warm('整点 30 秒')
-            wait_until(max(target_time - timedelta(seconds=3), now()))
-            warm('整点 3 秒')
+            wait_until(max(target_time - timedelta(seconds=8), now()))
+            warm('整点 8 秒')
             wait_until(target_time)
             LOG.info('触发偏差 %.3f ms', (now() - target_time).total_seconds() * 1000)
     results = []

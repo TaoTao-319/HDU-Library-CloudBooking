@@ -214,8 +214,8 @@ except main.AlreadyRunning:
         client.available_seats.assert_not_called()
         self.assertEqual(events, [('wait', target - timedelta(seconds=30)),
                                  ('warm', target - timedelta(seconds=30)),
-                                 ('wait', target - timedelta(seconds=3)),
-                                 ('warm', target - timedelta(seconds=3)),
+                                 ('wait', target - timedelta(seconds=8)),
+                                 ('warm', target - timedelta(seconds=8)),
                                  ('wait', target), ('submit', target)])
 
     def test_run_summary_reports_order_and_sign_in_window(self):
@@ -252,11 +252,34 @@ except main.AlreadyRunning:
                                           {'CODE': 'ok', 'DATA': {'result': 'success', 'bookingId': '9'}}])
         client.verify = Mock(return_value={'booking_id': '9'})
         with patch('main.now', return_value=target), patch('main.time.sleep') as sleep:
-            result = client.book_slot(100, 200, [{'id': 62599}], target + timedelta(seconds=4))
+            result = client.book_slot(100, 200, [{'id': 62599}], target + timedelta(seconds=8))
         self.assertTrue(result['submission_confirmed'])
-        # 整点退避改为 1/2/3 秒，避免 0.4 秒就撞上"请求太频繁"。
-        sleep.assert_called_once_with(1.0)
+        # 放号瞬间改成毫秒级递进：0.15 秒就重试同一座位，抢在别人前面。
+        sleep.assert_called_once_with(0.15)
         self.assertEqual([call.kwargs['data']['seats[0]'] for call in client.request.call_args_list], [62599, 62599])
+
+    def test_rate_limit_is_retried_inside_the_opening_window(self):
+        client = self.client()
+        target = datetime(2026, 10, 20, 20, tzinfo=main.SHANGHAI)
+        # 2026-10-23 真实故障：整点第一次提交就被判"请求太频繁"，旧逻辑直接弃轮，
+        # 要等 25 秒才有下一次机会。现在窗口内应短退避后立刻重试。
+        client.request = Mock(side_effect=[{'MESSAGE': '请求太频繁了，请稍后再试'},
+                                          {'CODE': 'ok', 'DATA': {'result': 'success', 'bookingId': '9'}}])
+        client.verify = Mock(return_value={'booking_id': '9'})
+        with patch('main.now', return_value=target), patch('main.time.sleep') as sleep:
+            result = client.book_slot(100, 200, [{'id': 62599}], target + timedelta(seconds=8))
+        self.assertTrue(result['submission_confirmed'])
+        sleep.assert_called_once_with(1.0)
+        self.assertEqual(client.request.call_count, 2)
+
+    def test_rate_limit_outside_the_window_stops_the_round_immediately(self):
+        client = self.client()
+        target = datetime(2026, 10, 20, 20, 0, 30, tzinfo=main.SHANGHAI)
+        client.request = Mock(return_value={'MESSAGE': '请求太频繁了，请稍后再试'})
+        with patch('main.now', return_value=target), patch('main.time.sleep'), \
+                self.assertRaisesRegex(main.BookingError, '限流'):
+            client.book_slot(100, 200, [{'id': 1}], target - timedelta(seconds=1))
+        self.assertEqual(client.request.call_count, 1)
 
     def test_opening_retries_are_bounded_and_not_used_after_window(self):
         for timed in (True, False):
@@ -264,11 +287,11 @@ except main.AlreadyRunning:
                 client = self.client()
                 target = datetime(2026, 10, 20, 20, tzinfo=main.SHANGHAI)
                 client.request = Mock(return_value={'MESSAGE': '超出可预约座位时间范围'})
-                current = target if timed else target + timedelta(seconds=5)
+                current = target if timed else target + timedelta(seconds=9)
                 with patch('main.now', return_value=current), patch('main.time.sleep'), \
                         self.assertRaisesRegex(main.BookingError, '时间范围'):
-                    client.book_slot(100, 200, [{'id': 1}], target + timedelta(seconds=4))
-                self.assertEqual(client.request.call_count, 4 if timed else 1)
+                    client.book_slot(100, 200, [{'id': 1}], target + timedelta(seconds=8))
+                self.assertEqual(client.request.call_count, 5 if timed else 1)
 
     def test_custom_search_does_not_request_unrelated_categories(self):
         client = self.client()
@@ -330,7 +353,7 @@ except main.AlreadyRunning:
         target = datetime(2026, 10, 20, 20, tzinfo=main.SHANGHAI)
         with patch('main.now', return_value=target), self.assertRaisesRegex(main.BookingError, '限流'):
             client.book_slot(100, 200, seats, target + timedelta(seconds=4))
-        self.assertEqual(client.request.call_count, 1)
+        self.assertEqual(client.request.call_count, 3)
 
     def test_network_login_failure_gets_one_retry_but_rejection_does_not(self):
         for message, calls in [('统一身份认证网络异常：ConnectionError', 2),
@@ -399,3 +422,4 @@ except main.AlreadyRunning:
 
 if __name__ == '__main__':
     unittest.main()
+
