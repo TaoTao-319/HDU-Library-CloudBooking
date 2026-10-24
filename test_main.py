@@ -351,9 +351,31 @@ except main.AlreadyRunning:
         client.verify.assert_called_once_with('9', 100, 200, 62622)
         client.request = Mock(return_value={'MESSAGE': '操作频繁，未开放'})
         target = datetime(2026, 10, 20, 20, tzinfo=main.SHANGHAI)
-        with patch('main.now', return_value=target), self.assertRaisesRegex(main.BookingError, '限流'):
+        with patch('main.now', return_value=target), patch('main.time.sleep'), \
+                self.assertRaisesRegex(main.BookingError, '限流'):
             client.book_slot(100, 200, seats, target + timedelta(seconds=4))
-        self.assertEqual(client.request.call_count, 3)
+        # 1 次原始提交 + 3 次限流短退避（1/2/3 秒），全部落在本轮预算内。
+        self.assertEqual(client.request.call_count, 4)
+
+    def test_release_second_skips_slow_duplicate_sweep(self):
+        target = datetime(2026, 10, 20, 20, tzinfo=main.SHANGHAI)
+        args = Mock(check=False, test_booking=False)
+        client = Mock()
+        client.covered_booking.return_value = None
+        client.book_fourth_floor.return_value = {
+            'room': '四楼', 'seat': '17', 'begin': '2026-10-22T15:00:00+08:00', 'booking_id': '9'}
+        user_config = {'自定义': {'房间': '四楼', '优先级': [
+            {'名称': '特等座', '区间': [[62581, 62622]]}]}}
+        for offset, expected in ((30, False), (120, True)):
+            with self.subTest(offset=offset), tempfile.TemporaryDirectory() as folder, \
+                    patch('main.LOCAL', Path(folder)), \
+                    patch('main.now', return_value=target - timedelta(seconds=offset)), \
+                    patch('main.wait_until'):
+                client.bookings.reset_mock()
+                main.reserve_day(client, args, {'name': '自定义'}, [(15, 7)],
+                                 target.date(), target, {}, user_config)
+                # 放号前 90 秒内禁止拉 myBookingList（高峰要 2–6 秒），更早才查重。
+                self.assertEqual(client.bookings.called, expected)
 
     def test_network_login_failure_gets_one_retry_but_rejection_does_not(self):
         for message, calls in [('统一身份认证网络异常：ConnectionError', 2),

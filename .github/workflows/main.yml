@@ -8,27 +8,23 @@ on:
         type: choice
         options: [book, check]
         default: book
-  schedule:
-    # GitHub cron is always UTC; Beijing time is UTC+8, so 11:20 UTC = 19:20.
-    # Every entry starts before the 20:00 release and the job then waits for the
-    # exact release second internally, which makes GitHub scheduler delay harmless.
-    - cron: '20 11 * * *'   # 19:20 Beijing
-    - cron: '35 11 * * *'   # 19:35 Beijing
-    - cron: '50 11 * * *'   # 19:50 Beijing
+  # 2026-10-24：云端自动（schedule）已全部关闭。GitHub 原生 cron 对本仓库
+  # 长期零投递，而云端 Job 从 19:20 起等 40 分钟才开始提交，速度和确定性都不如
+  # 本机 19:50 计划任务；保留云端定时只会在同一账号上叠加请求、拖慢抢座。
+  # 本文件现在只保留 workflow_dispatch 作为手动兜底（mode=book/check）。
 
 permissions:
   contents: read
 
 concurrency:
-  # Serialise runs so a delayed trigger can never book two seats for one slot.
+  # 手动触发也串行化，避免同一次放号出现两个云端 Job。
   group: hdu-seat-booking
   cancel-in-progress: false
 
 jobs:
   bot:
     runs-on: ubuntu-latest
-    # A 19:20 start must survive until the 20:15 cutoff; a manual dispatch may
-    # start even earlier, so allow a generous ceiling.
+    # 手动 dispatch 可能提前很久启动，给足等待到 20:15 的天花板。
     timeout-minutes: 75
     env:
       TZ: Asia/Shanghai

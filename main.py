@@ -251,9 +251,9 @@ class SeatAutoBooker:
             remaining = (deadline - now()).total_seconds()
             if remaining <= 0:
                 raise BookingError('本轮时间预算已用完，停止新增预约请求')
-            # 高峰期限流时服务器可能长时间不响应。把读超时压到 6 秒，
-            # 让本轮失败得更快、把剩余预算留给下一轮或下一个座位。
-            kwargs['timeout'] = (min(2, remaining / 2), min(6, remaining / 2))
+            # 高峰期限流时服务器可能长时间不响应。读超时压到 4 秒：4 秒没回音
+            # 基本等于这一枪废了，与其干等 6 秒，不如立刻进入下一枪。
+            kwargs['timeout'] = (min(2, remaining / 2), min(4, remaining / 2))
         response = self.session.request(method, BASE_URL + path, **kwargs)
         elapsed = (time.perf_counter() - started) * 1000
         response.raise_for_status()
@@ -477,14 +477,17 @@ class SeatAutoBooker:
             message = str(result.get('msg') or payload.get('MESSAGE') or '预约失败')
             limited = any(key in message for key in ('频繁', '人数过多', '稍后'))
             not_open = any(word in message for word in ('超出可预约座位时间范围', '未开放', '未到预约'))
-            opening = bool(opening_deadline and now() < opening_deadline)
+            # 本轮还能用到什么时候：整点放号窗口优先，其次是本轮预算。
+            budget_end = opening_deadline or getattr(self, 'round_deadline', None)
+            opening = bool(budget_end and now() < budget_end)
             # 整点刚放号时，服务端会对同一账号做突发限流。2026-10-23 实测第一次
             # 提交（20:00:00.02，仅 20ms 就返回）就被判"请求太频繁"，若按老逻辑
             # 直接放弃整轮，要等到 20:00:25 才有下一次机会，特等座早没了。
-            # 所以在放号窗口内给限流 2 次短退避（1s、2s），窗口外才放弃整轮。
-            if limited and opening and limit_retries < 2:
-                delay = min((1.0, 2.0)[limit_retries],
-                            (opening_deadline - now()).total_seconds())
+            # 现在只要本轮还有预算，就按 1/2/3 秒连续短退避重试同一座位，
+            # 把整点后最宝贵的几秒全部用满，而不是提前弃轮。
+            if limited and opening and limit_retries < 3:
+                delay = min((1.0, 2.0, 3.0)[limit_retries],
+                            (budget_end - now()).total_seconds())
                 if delay > 0:
                     LOG.warning('限流退避 %.1f 秒后重试同一座位：%s', delay, message)
                     time.sleep(delay)
@@ -552,7 +555,11 @@ def parse_args():
 
 
 def reserve_day(client, args, day, slots, target_date, target_time, seat_config, user_config):
-    existing = client.bookings()
+    # 放号前 90 秒内不再拉 myBookingList：高峰期这一页要 2–6 秒（10-23 实测
+    # 2026ms / 4535ms / 5754ms），正好挤掉整点提交窗口。重复订单改由服务端
+    # 拒绝 + 失败后的 verify 兜住，整点前后只做"候选座位 + 提交"这两件事。
+    near_release = target_time is not None and now() >= target_time - timedelta(seconds=90)
+    existing = [] if near_release else client.bookings()
     prepared = []
     midnight = datetime.combine(target_date, datetime.min.time(), SHANGHAI)
     for start, hours in slots:
@@ -589,7 +596,7 @@ def reserve_day(client, args, day, slots, target_date, target_time, seat_config,
         else:
             LOG.info('登录、查单及候选座位准备已完成；等待 %s', target_time.isoformat())
 
-            def warm(stage, timeout=(2, 3)):
+            def warm(stage, timeout=(1, 2)):
                 try:
                     client.get_user_info(timeout=timeout)
                     LOG.info('连接预热完成（%s前）', stage)
